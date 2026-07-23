@@ -66,6 +66,28 @@ describe("parseMessage normalization", () => {
     expect(m?.reply).toEqual({ id: "mgr_id:42", title: "Rohit Shah" });
   });
 
+  it("strips the ListV3: prefix Whapi adds to list_reply ids (picker-loop regression)", () => {
+    // Whapi returns our row id wrapped as `ListV3:mgr_id:42`; the router matches
+    // on the bare id, so parseMessage must normalize it back.
+    const m = parseMessage({
+      id: "l2",
+      chat_id: "9199@s.whatsapp.net",
+      type: "reply",
+      reply: { type: "list_reply", list_reply: { id: "ListV3:mgr_id:42", title: "Rohit Shah" } },
+    });
+    expect(m?.reply).toEqual({ id: "mgr_id:42", title: "Rohit Shah" });
+  });
+
+  it("strips the ListV3: prefix from mgr:none / nav:more ids too", () => {
+    const none = parseMessage({
+      id: "l3",
+      chat_id: "9199@s.whatsapp.net",
+      type: "reply",
+      reply: { type: "list_reply", list_reply: { id: "ListV3:mgr:none", title: "top" } },
+    });
+    expect(none?.reply?.id).toBe("mgr:none");
+  });
+
   it("falls back to `from` for wa_id when chat_id is missing", () => {
     const m = parseMessage({
       id: "m2",

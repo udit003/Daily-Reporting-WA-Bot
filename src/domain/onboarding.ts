@@ -1,7 +1,8 @@
 /**
  * Onboarding state machine (CHANGE C + E + F).
  *
- * States: new → ask_name → ask_manager → [ask_pending_manager_phone] → done.
+ * States: new → ask_name → ask_manager →
+ *   [ask_pending_manager_name → ask_pending_manager_phone] → done.
  *
  * Only name + manager are collected; the phone is captured automatically from
  * the WhatsApp JID and the user is never asked for it. `is_manager` is derived
@@ -21,8 +22,8 @@ import type {
 } from "../db/queries";
 import type { ParsedMessage } from "../whapi/types";
 import type { OnboardingHandler } from "./types";
-import { buildHelpMessage as defaultBuildHelpMessage } from "./help";
-import { isValidPhone, normalizePhone, waIdToPhone } from "../util/phone";
+import { buildHelpMessage as defaultBuildHelpMessage, ONBOARDING_UPDATE_GUIDANCE } from "./help";
+import { isValidPhone, normalizePhone, phoneToWaId, waIdToPhone } from "../util/phone";
 import { normalizeName } from "../util/name";
 import { logger } from "../util/logger";
 
@@ -105,6 +106,30 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
     );
   }
 
+  /**
+   * Send a best-effort WhatsApp invite to a not-yet-joined manager. The
+   * employee's own name is used to personalize it. Never throws — a failed
+   * invite must not block the employee from finishing and reporting.
+   */
+  async function sendManagerInvite(
+    employee: User,
+    managerPhone: string,
+  ): Promise<void> {
+    try {
+      const managerWaId = phoneToWaId(managerPhone);
+      const employeeName = employee.name ?? "A team member";
+      const invite =
+        `👋 Hi! ${employeeName} has added you as their manager on the Narang Realty daily-reporting bot.\n\n` +
+        `Reply *onboard* here to set up your account. Once you're in, you'll automatically see ${employeeName}'s daily updates and can ask about your team.`;
+      await deps.whapi.sendText(managerWaId, invite);
+    } catch (err) {
+      logger.error("manager invite send failed", {
+        err,
+        employeeId: employee.id,
+      });
+    }
+  }
+
   /** Reach the `done` state: persist, reconcile, then send the role-based menu. */
   async function finish(user: User): Promise<void> {
     await deps.db.updateUserOnboarding(user.id, { onboarding_state: "done" });
@@ -115,6 +140,8 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
     }
     // Recompute derived flags AFTER reconciliation so the menu is current.
     const fresh = (await deps.db.getUserById(user.id)) ?? user;
+    // Coach the new user on writing a useful update, then show the role menu.
+    await deps.whapi.sendText(fresh.wa_id, ONBOARDING_UPDATE_GUIDANCE);
     await deps.whapi.sendText(fresh.wa_id, buildHelp(fresh));
   }
 
@@ -229,11 +256,11 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
 
           if (id === "mgr:pending") {
             await deps.db.updateUserOnboarding(user.id, {
-              onboarding_state: "ask_pending_manager_phone",
+              onboarding_state: "ask_pending_manager_name",
             });
             await deps.whapi.sendText(
               user.wa_id,
-              "No problem. What's your manager's phone number (with country code)? I'll link you up when they join.",
+              "No problem! What's your manager's *full name*? I'll invite them to join.",
             );
             return;
           }
@@ -264,6 +291,25 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
           return;
         }
 
+        case "ask_pending_manager_name": {
+          if (!text) {
+            await deps.whapi.sendText(
+              user.wa_id,
+              "Please send your manager's full name.",
+            );
+            return;
+          }
+          await deps.db.updateUserOnboarding(user.id, {
+            pending_manager_name: text,
+            onboarding_state: "ask_pending_manager_phone",
+          });
+          await deps.whapi.sendText(
+            user.wa_id,
+            `Got it. What's ${text}'s *WhatsApp number* (with country code, e.g. +91 98200 12345)? I'll send them an invite and link you up automatically when they join.`,
+          );
+          return;
+        }
+
         case "ask_pending_manager_phone": {
           if (!text || !isValidPhone(text)) {
             await deps.whapi.sendText(
@@ -276,6 +322,9 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
           await deps.db.updateUserOnboarding(user.id, {
             pending_manager_phone: phone,
           });
+          // Send the manager a WhatsApp invite (best-effort — never blocks the
+          // employee from finishing onboarding and reporting right away).
+          await sendManagerInvite(user, phone);
           await finish(user);
           return;
         }

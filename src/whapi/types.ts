@@ -120,10 +120,24 @@ export function parseMessage(
   const listReply = raw.reply?.list_reply;
   const chosen = buttonReply ?? listReply;
   if (chosen && typeof chosen.id === "string" && chosen.id !== "") {
-    msg.reply = { id: chosen.id, title: typeof chosen.title === "string" ? chosen.title : "" };
+    msg.reply = {
+      id: normalizeReplyId(chosen.id),
+      title: typeof chosen.title === "string" ? chosen.title : "",
+    };
   }
 
   return msg;
+}
+
+/**
+ * WhatsApp/Whapi wrap the row id we send in a list message with a versioned
+ * prefix on the way back (e.g. we send `mgr_id:1` and receive
+ * `ListV3:mgr_id:1`). The router matches on our bare ids (`mgr_id:`,
+ * `mgr:none`, `nav:more:`…), so strip any leading `ListV<n>:` prefix here — the
+ * single parse boundary — so downstream matching is prefix-agnostic.
+ */
+export function normalizeReplyId(id: string): string {
+  return id.replace(/^List(?:V\d+)?:/i, "");
 }
 
 // ---------------------------------------------------------------------------

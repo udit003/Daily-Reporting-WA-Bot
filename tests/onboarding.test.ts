@@ -26,6 +26,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     manager_id: null,
     onboarding_state: "new",
     pending_manager_phone: null,
+    pending_manager_name: null,
     last_reminder_sent_at: null,
     reminder_count_today: 0,
     reminder_day: null,
@@ -189,8 +190,9 @@ describe("onboarding: first contact + name step", () => {
     expect(db._users.get(user.id)!.is_root).toBe(true);
     expect(sendListPage).not.toHaveBeenCalled();
     expect(db._users.get(user.id)!.onboarding_state).toBe("done");
-    // Help menu sent on completion.
-    expect(sendText).toHaveBeenCalledTimes(1);
+    // Update guidance + role help menu sent on completion.
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(sendText.mock.calls[0][1]).toMatch(/voice note|update/i);
   });
 
   it("ask_name with a non-CXO name presents the picker (no elevation)", async () => {
@@ -233,11 +235,12 @@ describe("onboarding: manager selection", () => {
 
     expect(db.setUserManager).toHaveBeenCalledWith(1, 10);
     expect(db._users.get(10)!.is_manager).toBe(true);
-    // Completed → state done, reconcile called, help menu sent.
+    // Completed → state done, reconcile called, guidance + help menu sent.
     expect(db._users.get(1)!.onboarding_state).toBe("done");
     expect(db.reconcilePendingManagers).toHaveBeenCalledWith("111");
-    expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText.mock.calls[0][1]).toMatch(/daily update/i);
+    expect(sendText).toHaveBeenCalledTimes(2);
+    // [0] = update-writing guidance, [1] = role menu.
+    expect(sendText.mock.calls[0][1]).toMatch(/voice note|update/i);
   });
 
   it("cycle refusal path: setUserManager rejects → explains + re-presents picker, stays ask_manager", async () => {
@@ -286,16 +289,16 @@ describe("onboarding: mgr:none multi-root (CHANGE E)", () => {
     expect(db._users.get(10)!.is_root).toBe(true);
     // Completed with help menu; NO re-prompt of the picker after mgr:none.
     expect(db._users.get(1)!.onboarding_state).toBe("done");
-    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(2);
     // Only the manager picker was never re-sent as a "root exists" rejection.
     expect(sendListPage).not.toHaveBeenCalled();
-    // Root gets the reminder-admin line in the menu.
-    expect(sendText.mock.calls[0][1]).toMatch(/Tune reminders/i);
+    // [0] = guidance, [1] = role menu; root gets the reminder-admin line.
+    expect(sendText.mock.calls[1][1]).toMatch(/Tune reminders/i);
   });
 });
 
 describe("onboarding: mgr:pending phone capture + reconciliation", () => {
-  it("mgr:pending → asks for phone (ask_pending_manager_phone)", async () => {
+  it("mgr:pending → asks for manager's name (ask_pending_manager_name)", async () => {
     const user = makeUser({ id: 1, onboarding_state: "ask_manager", name: "Rohit" });
     const db = makeDb([user]);
     const { whapi, sendText } = makeWhapi();
@@ -303,13 +306,31 @@ describe("onboarding: mgr:pending phone capture + reconciliation", () => {
 
     await h.handle({ ...user }, makeMsg({ type: "reply", reply: { id: "mgr:pending", title: "not joined" } }));
 
-    expect(db._users.get(1)!.onboarding_state).toBe("ask_pending_manager_phone");
+    expect(db._users.get(1)!.onboarding_state).toBe("ask_pending_manager_name");
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText.mock.calls[0][1]).toMatch(/phone/i);
+    expect(sendText.mock.calls[0][1]).toMatch(/full name/i);
   });
 
-  it("valid pending phone stores it, completes, and reconciles on this user's phone", async () => {
-    const user = makeUser({ id: 1, onboarding_state: "ask_pending_manager_phone", name: "Rohit" });
+  it("ask_pending_manager_name stores the name and asks for the number", async () => {
+    const user = makeUser({ id: 1, onboarding_state: "ask_pending_manager_name", name: "Rohit" });
+    const db = makeDb([user]);
+    const { whapi, sendText } = makeWhapi();
+    const h = createOnboardingHandler({ db, whapi });
+
+    await h.handle({ ...user }, makeMsg({ text: "Advait Narang" }));
+
+    expect(db._users.get(1)!.pending_manager_name).toBe("Advait Narang");
+    expect(db._users.get(1)!.onboarding_state).toBe("ask_pending_manager_phone");
+    expect(sendText.mock.calls[0][1]).toMatch(/number/i);
+  });
+
+  it("valid pending phone stores it, invites the manager, completes, and reconciles", async () => {
+    const user = makeUser({
+      id: 1,
+      onboarding_state: "ask_pending_manager_phone",
+      name: "Rohit",
+      pending_manager_name: "Advait Narang",
+    });
     const db = makeDb([user]);
     const { whapi, sendText } = makeWhapi();
     const h = createOnboardingHandler({ db, whapi });
@@ -319,8 +340,15 @@ describe("onboarding: mgr:pending phone capture + reconciliation", () => {
     expect(db._users.get(1)!.pending_manager_phone).toBe("919820012345");
     expect(db._users.get(1)!.onboarding_state).toBe("done");
     expect(db.reconcilePendingManagers).toHaveBeenCalledWith("111");
-    expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText.mock.calls[0][1]).toMatch(/daily update/i);
+    // 3 sends: manager invite + finish guidance + role menu.
+    expect(sendText).toHaveBeenCalledTimes(3);
+    // The invite goes to the manager's JID and names the employee.
+    const inviteCall = sendText.mock.calls.find(
+      (c) => c[0] === "919820012345@s.whatsapp.net",
+    );
+    expect(inviteCall).toBeTruthy();
+    expect(inviteCall![1]).toMatch(/Rohit/);
+    expect(inviteCall![1]).toMatch(/onboard/i);
   });
 
   it("invalid pending phone → re-prompt, stays in ask_pending_manager_phone", async () => {
@@ -353,8 +381,9 @@ describe("onboarding: mgr:pending phone capture + reconciliation", () => {
     await h.handle({ ...user }, makeMsg({ type: "reply", reply: { id: "mgr:none", title: "top" } }));
 
     expect(db.reconcilePendingManagers).toHaveBeenCalledWith("111");
-    // Menu computed AFTER reconciliation → includes the manager team-query line.
-    expect(sendText.mock.calls[0][1]).toMatch(/Ask about your team/i);
+    // Menu (message [1], after guidance [0]) computed AFTER reconciliation →
+    // includes the manager team-query line.
+    expect(sendText.mock.calls[1][1]).toMatch(/Ask about your team/i);
   });
 });
 

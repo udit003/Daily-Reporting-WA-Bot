@@ -15,6 +15,7 @@ export type OnboardingState =
   | "new"
   | "ask_name"
   | "ask_manager"
+  | "ask_pending_manager_name"
   | "ask_pending_manager_phone"
   | "done";
 
@@ -29,6 +30,7 @@ export interface User {
   manager_id: number | null;
   onboarding_state: OnboardingState;
   pending_manager_phone: string | null;
+  pending_manager_name: string | null;
   last_reminder_sent_at: Date | null;
   reminder_count_today: number;
   reminder_day: string | null; // YYYY-MM-DD
@@ -104,6 +106,7 @@ export interface OnboardingUpdate {
   is_root?: boolean;
   manager_id?: number | null;
   pending_manager_phone?: string | null;
+  pending_manager_name?: string | null;
 }
 
 /** Anything we can run queries on: the pool or a checked-out client. */
@@ -126,7 +129,8 @@ export type SetManagerResult =
 
 const USER_COLS = `
   id, wa_id, phone, name, team_id, is_manager, is_root, manager_id,
-  onboarding_state, pending_manager_phone, last_reminder_sent_at,
+  onboarding_state, pending_manager_phone, pending_manager_name,
+  last_reminder_sent_at,
   reminder_count_today, to_char(reminder_day, 'YYYY-MM-DD') AS reminder_day,
   created_at
 `;
@@ -273,6 +277,8 @@ export async function updateUserOnboarding(
   if (patch.manager_id !== undefined) add("manager_id", patch.manager_id);
   if (patch.pending_manager_phone !== undefined)
     add("pending_manager_phone", patch.pending_manager_phone);
+  if (patch.pending_manager_name !== undefined)
+    add("pending_manager_name", patch.pending_manager_name);
 
   if (sets.length === 0) {
     return getUserById(userId, runner);

@@ -16,6 +16,22 @@ export const HELP_BASIC =
   "📝 Send your daily update anytime as a text message or a voice note.";
 export const HELP_MENU_HINT = "Type *help* to see this menu again.";
 
+/**
+ * Onboarding-complete guidance — sent once when a user finishes onboarding, to
+ * coach them on writing a useful update (voice or text). Kept separate from the
+ * help menu so it can lead the welcome message.
+ */
+export const ONBOARDING_UPDATE_GUIDANCE = [
+  "✅ You're all set! When you're ready, share today's update — as a *voice note* 🎤 or a *text message*, whatever's easier.",
+  "For a great update, try to:",
+  "• 🏢 Mention the *project name(s)* you worked on (e.g. Narang Vivenda, Privado, Valora, Asteria).",
+  "• ✅ Say what you *got done*, any *blockers*, and *next steps*.",
+  "• 👥 Name the *teammates* involved if relevant.",
+  "• 🗣️ Speak or type in *Hindi, Hinglish or English* — whatever's natural. No need to translate.",
+  "",
+  "Example: \"Aaj Narang Vivenda ke liye 3 site visits kiye, do bookings close hui. Privado ka approval Rajesh ke saath pending hai, kal follow up karunga.\"",
+].join("\n");
+
 /** Manager section — shown to users with ≥1 descendant (derived is_manager). */
 export const HELP_MANAGER =
   "❓ Ask about your team, e.g. 'What's happening with Narang Vivenda?' or 'What did <name> do this week?'";
