@@ -51,13 +51,18 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         return reply.code(404).send({ error: "not found" });
       }
 
+      const rawMessages = Array.isArray(request.body?.messages)
+        ? request.body.messages
+        : [];
       const messages = parseWebhook(request.body);
       let seq = 0;
       for (const msg of messages) {
         // Reject group chats (no reply, not recorded).
         if (msg.is_group) continue;
         try {
-          await recordInbound(msg.id, msg.wa_id, seq, msg);
+          // Store the ORIGINAL raw Whapi message; the processor re-parses it.
+          const raw = rawMessages.find((m) => m?.id === msg.id) ?? msg;
+          await recordInbound(msg.id, msg.wa_id, seq, raw);
         } catch (err) {
           // Recording failure must not block the fast-ack; log and continue.
           logger.error("recordInbound failed", { err, msgId: msg.id });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 import { buildServer } from "../src/server";
+import { parseMessage } from "../src/whapi/types";
 import type { Config } from "../src/config";
 
 beforeAll(() => {
@@ -37,13 +38,15 @@ function testConfig(): Config {
 /** In-memory recordInbound that collapses on duplicate message id. */
 function fakeRecorder() {
   const seen = new Set<string>();
-  const inserts: { id: string; waId: string; seq: number }[] = [];
-  const recordInbound = vi.fn(async (id: string, waId: string, seq: number) => {
-    if (seen.has(id)) return false; // ON CONFLICT DO NOTHING
-    seen.add(id);
-    inserts.push({ id, waId, seq });
-    return true;
-  });
+  const inserts: { id: string; waId: string; seq: number; raw: unknown }[] = [];
+  const recordInbound = vi.fn(
+    async (id: string, waId: string, seq: number, raw: unknown) => {
+      if (seen.has(id)) return false; // ON CONFLICT DO NOTHING
+      seen.add(id);
+      inserts.push({ id, waId, seq, raw });
+      return true;
+    },
+  );
   return { recordInbound, inserts, seen };
 }
 
@@ -117,6 +120,24 @@ describe("POST /webhook idempotency + ordering", () => {
     });
     expect(inserts.map((i) => i.id)).toEqual(["a", "b", "c"]);
     expect(inserts.map((i) => i.seq)).toEqual([0, 1, 2]);
+    await app.close();
+  });
+
+  it("stores the ORIGINAL raw Whapi message so the processor can re-parse text", async () => {
+    // Regression: the server must persist the raw wire message (text.body),
+    // not the already-parsed form — otherwise the processor's parseMessage
+    // pass drops the text and every post-greeting step sees empty input.
+    const { recordInbound, inserts } = fakeRecorder();
+    const app = buildServer({ config: testConfig(), recordInbound });
+    await app.inject({
+      method: "POST",
+      url: `/webhook/${SECRET}`,
+      payload: { messages: [textMsg("m1", "111@s.whatsapp.net", "Gopal Narang")] },
+    });
+    expect(inserts).toHaveLength(1);
+    // The stored raw round-trips through parseMessage to recover the text.
+    const reparsed = parseMessage(inserts[0].raw as any);
+    expect(reparsed?.text).toBe("Gopal Narang");
     await app.close();
   });
 });
