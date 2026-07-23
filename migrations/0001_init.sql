@@ -15,7 +15,7 @@ CREATE TABLE users (
   name                  TEXT,
   team_id               INTEGER REFERENCES teams(id),  -- NULLABLE / optional; not set during onboarding
   is_manager            BOOLEAN NOT NULL DEFAULT false, -- DERIVED: flipped true when someone reports to them
-  is_root               BOOLEAN NOT NULL DEFAULT false, -- CEO
+  is_root               BOOLEAN NOT NULL DEFAULT false, -- CHANGE E: informational top-level marker; NOT unique (multiple roots allowed)
   manager_id            INTEGER REFERENCES users(id),
   onboarding_state      TEXT NOT NULL DEFAULT 'new',    -- new|ask_name|ask_manager|ask_pending_manager_phone|done
   pending_manager_phone TEXT,                          -- normalized digits
@@ -27,8 +27,9 @@ CREATE TABLE users (
 );
 CREATE INDEX idx_users_manager ON users(manager_id);
 CREATE INDEX idx_users_pending_mgr ON users(pending_manager_phone);
--- at most one completed root:
-CREATE UNIQUE INDEX uq_single_root ON users((true)) WHERE is_root AND onboarding_state='done';
+-- CHANGE E: NO single-root unique index. Any number of users may be a top-level
+-- root (manager_id NULL, is_root=true). Already-migrated DBs additionally run
+-- migrations/0003_multi_root.sql which drops the historical uq_single_root index.
 
 CREATE TABLE projects (
   id SERIAL PRIMARY KEY,

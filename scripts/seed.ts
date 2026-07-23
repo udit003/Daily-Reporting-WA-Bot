@@ -12,6 +12,7 @@
 import "dotenv/config";
 import { createPool } from "../src/db/pool";
 import { normalizeProjectName } from "../src/util/projectName";
+import { normalizeName } from "../src/util/name";
 import { normalizePhone } from "../src/util/phone";
 import type { Pool } from "pg";
 
@@ -36,6 +37,15 @@ const TEAMS = [
   "HR & Admin / IT",
 ];
 
+// Pre-known top-level executives. When any of them onboards, the name they type
+// is matched case/whitespace/punctuation-insensitively against these and they
+// are auto-elevated to a top-level root (no manager picker). Add more here.
+const CXOS = [
+  "Gopal Narang",
+  "Advait Narang",
+  "Soham Narang",
+];
+
 async function seedProjects(pool: Pool): Promise<void> {
   for (const canonical of PROJECTS) {
     const norm = normalizeProjectName(canonical);
@@ -57,6 +67,18 @@ async function seedTeams(pool: Pool): Promise<void> {
     );
   }
   console.log(`seeded ${TEAMS.length} reference teams`);
+}
+
+async function seedCxos(pool: Pool): Promise<void> {
+  for (const name of CXOS) {
+    const norm = normalizeName(name);
+    await pool.query(
+      `INSERT INTO cxos (name, norm_name) VALUES ($1, $2)
+       ON CONFLICT (norm_name) DO UPDATE SET name = EXCLUDED.name`,
+      [name, norm],
+    );
+  }
+  console.log(`seeded ${CXOS.length} CXOs`);
 }
 
 async function seedSettings(pool: Pool): Promise<void> {
@@ -106,6 +128,7 @@ async function main(): Promise<void> {
   try {
     await seedProjects(pool);
     await seedTeams(pool);
+    await seedCxos(pool);
     await seedSettings(pool);
     await seedCeo(pool);
     console.log("seed complete.");

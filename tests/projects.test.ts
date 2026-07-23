@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { getPool, closePool, cleanDb } from "./helpers/db";
 import {
   matchOrCreateProject,
   findProjectByNorm,
   appendProjectAlias,
+  type Project,
 } from "../src/db/queries";
 import { normalizeProjectName } from "../src/util/projectName";
+import { createProjects, normalize, type ProjectsDb } from "../src/domain/projects";
 
 beforeAll(async () => {
   await cleanDb();
@@ -97,5 +99,149 @@ describe("findProjectByNorm (lookup-only)", () => {
     expect(missing).toBeNull();
     const count = (await getPool().query(`SELECT count(*)::int AS c FROM projects`)).rows[0].c;
     expect(count).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Domain projects module (Task 4): matchOrCreate + findByNorm with a mocked DB
+// so the match-vs-create + alias-append logic is verified without Postgres.
+// ---------------------------------------------------------------------------
+
+function makeRow(overrides: Partial<Project> = {}): Project {
+  return {
+    id: 1,
+    canonical_name: "Narang Vivenda",
+    norm_name: "vivenda",
+    aliases: [],
+    created_at: new Date(),
+    ...overrides,
+  };
+}
+
+/** An in-memory ProjectsDb keyed on norm_name, with a low fuzzy threshold. */
+function makeProjectsDb(seed: Project[] = []) {
+  const rows = new Map<string, Project>();
+  for (const r of seed) rows.set(r.norm_name, { ...r, aliases: [...r.aliases] });
+  let nextId = Math.max(0, ...seed.map((r) => r.id)) + 1;
+
+  const db: ProjectsDb & {
+    findProjectByNorm: ReturnType<typeof vi.fn>;
+    findProjectBySimilarity: ReturnType<typeof vi.fn>;
+    appendProjectAlias: ReturnType<typeof vi.fn>;
+    matchOrCreateProject: ReturnType<typeof vi.fn>;
+    _rows: Map<string, Project>;
+  } = {
+    _rows: rows,
+    findProjectByNorm: vi.fn(async (norm: string) => {
+      const r = rows.get(norm);
+      return r ? { ...r } : null;
+    }),
+    // Trivial fuzzy match: shared token overlap counts as similar (>=threshold
+    // handled by the caller; here we just return the first token-overlapping row).
+    findProjectBySimilarity: vi.fn(async (norm: string) => {
+      const tokens = new Set(norm.split(" "));
+      for (const r of rows.values()) {
+        const rt = r.norm_name.split(" ");
+        if (rt.some((t) => tokens.has(t))) return { ...r };
+      }
+      return null;
+    }),
+    appendProjectAlias: vi.fn(async (id: number, alias: string) => {
+      for (const r of rows.values()) {
+        if (r.id === id) {
+          if (alias !== r.canonical_name && !r.aliases.includes(alias)) {
+            r.aliases.push(alias);
+          }
+          return { ...r };
+        }
+      }
+      return null;
+    }),
+    matchOrCreateProject: vi.fn(async (canonical: string, norm: string) => {
+      const existing = rows.get(norm);
+      if (existing) return { ...existing };
+      const created = makeRow({ id: nextId++, canonical_name: canonical, norm_name: norm, aliases: [] });
+      rows.set(norm, created);
+      return { ...created };
+    }),
+  };
+  return db;
+}
+
+describe("projects.normalize (shared normalizer)", () => {
+  it("re-exports the shared normalizer", () => {
+    expect(normalize("Narang Vivenda")).toBe(normalizeProjectName("Narang Vivenda"));
+    expect(normalize("Narang Vivenda")).toBe("vivenda");
+  });
+});
+
+describe("projects.matchOrCreate", () => {
+  it("'Vivenda' and 'narang vivenda' collapse to one canonical project", async () => {
+    const db = makeProjectsDb();
+    const p = createProjects({ db, threshold: 0.3 });
+
+    const a = await p.matchOrCreate("Vivenda");
+    const b = await p.matchOrCreate("narang vivenda");
+
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(b!.id).toBe(a!.id); // same canonical row
+    // Only one physical row created.
+    expect(db._rows.size).toBe(1);
+    // matchOrCreateProject (create) called exactly once.
+    expect(db.matchOrCreateProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("appends a new raw alias to a matched project", async () => {
+    const db = makeProjectsDb([makeRow({ id: 5, canonical_name: "Narang Vivenda", norm_name: "vivenda" })]);
+    const p = createProjects({ db, threshold: 0.3 });
+
+    const r = await p.matchOrCreate("Vivenda Tower"); // normalizes to "vivenda tower" → fuzzy match
+    expect(r!.id).toBe(5);
+    expect(db.appendProjectAlias).toHaveBeenCalled();
+    expect(db._rows.get("vivenda")!.aliases).toContain("Vivenda Tower");
+    // No new row created.
+    expect(db.matchOrCreateProject).not.toHaveBeenCalled();
+  });
+
+  it("a below-threshold distinct string creates a new project", async () => {
+    const db = makeProjectsDb([makeRow({ id: 5, canonical_name: "Narang Vivenda", norm_name: "vivenda" })]);
+    const p = createProjects({ db, threshold: 0.3 });
+
+    const r = await p.matchOrCreate("Windsor BKC"); // no token overlap with "vivenda"
+    expect(r!.id).not.toBe(5);
+    expect(db.matchOrCreateProject).toHaveBeenCalledTimes(1);
+    expect(db._rows.size).toBe(2);
+  });
+
+  it("returns null (and never writes) for a blank / normalizes-to-empty name", async () => {
+    const db = makeProjectsDb();
+    const p = createProjects({ db, threshold: 0.3 });
+    const r = await p.matchOrCreate("   narang   "); // normalizes to ""
+    expect(r).toBeNull();
+    expect(db.matchOrCreateProject).not.toHaveBeenCalled();
+  });
+});
+
+describe("projects.findByNorm (lookup-only)", () => {
+  it("finds an existing project without ever writing", async () => {
+    const db = makeProjectsDb([makeRow({ id: 5, canonical_name: "Narang Vivenda", norm_name: "vivenda" })]);
+    const p = createProjects({ db, threshold: 0.3 });
+
+    const r = await p.findByNorm("Narang Vivenda");
+    expect(r!.id).toBe(5);
+    // Never creates or appends.
+    expect(db.matchOrCreateProject).not.toHaveBeenCalled();
+    expect(db.appendProjectAlias).not.toHaveBeenCalled();
+  });
+
+  it("returns null for an unknown project and still never writes", async () => {
+    const db = makeProjectsDb();
+    const p = createProjects({ db, threshold: 0.3 });
+
+    const r = await p.findByNorm("Totally Unknown");
+    expect(r).toBeNull();
+    expect(db.matchOrCreateProject).not.toHaveBeenCalled();
+    expect(db.appendProjectAlias).not.toHaveBeenCalled();
   });
 });

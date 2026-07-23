@@ -15,6 +15,7 @@ export type OnboardingState =
   | "new"
   | "ask_name"
   | "ask_manager"
+  | "ask_pending_manager_name"
   | "ask_pending_manager_phone"
   | "done";
 
@@ -29,6 +30,7 @@ export interface User {
   manager_id: number | null;
   onboarding_state: OnboardingState;
   pending_manager_phone: string | null;
+  pending_manager_name: string | null;
   last_reminder_sent_at: Date | null;
   reminder_count_today: number;
   reminder_day: string | null; // YYYY-MM-DD
@@ -104,6 +106,7 @@ export interface OnboardingUpdate {
   is_root?: boolean;
   manager_id?: number | null;
   pending_manager_phone?: string | null;
+  pending_manager_name?: string | null;
 }
 
 /** Anything we can run queries on: the pool or a checked-out client. */
@@ -126,7 +129,8 @@ export type SetManagerResult =
 
 const USER_COLS = `
   id, wa_id, phone, name, team_id, is_manager, is_root, manager_id,
-  onboarding_state, pending_manager_phone, last_reminder_sent_at,
+  onboarding_state, pending_manager_phone, pending_manager_name,
+  last_reminder_sent_at,
   reminder_count_today, to_char(reminder_day, 'YYYY-MM-DD') AS reminder_day,
   created_at
 `;
@@ -224,6 +228,19 @@ export async function getUserById(
   return rows[0] ?? null;
 }
 
+/** Fetch users by id (order is not guaranteed). Used to resolve names within a subtree. */
+export async function getUsersByIds(
+  ids: number[],
+  runner: Queryable = getPool(),
+): Promise<User[]> {
+  if (ids.length === 0) return [];
+  return q<User>(
+    runner,
+    `SELECT ${USER_COLS} FROM users WHERE id = ANY($1)`,
+    [ids],
+  );
+}
+
 export async function insertUser(
   input: NewUser,
   runner: Queryable = getPool(),
@@ -260,6 +277,8 @@ export async function updateUserOnboarding(
   if (patch.manager_id !== undefined) add("manager_id", patch.manager_id);
   if (patch.pending_manager_phone !== undefined)
     add("pending_manager_phone", patch.pending_manager_phone);
+  if (patch.pending_manager_name !== undefined)
+    add("pending_manager_name", patch.pending_manager_name);
 
   if (sets.length === 0) {
     return getUserById(userId, runner);
@@ -307,24 +326,22 @@ export async function setUserManager(
 }
 
 /**
- * Mark a user as the single root (CEO). Guarded by the `uq_single_root`
- * partial unique index: a second completed root raises a unique violation,
- * which we surface as a rejection.
+ * Mark a user as a top-level root (`is_root = true`, `manager_id = NULL`).
+ *
+ * CHANGE E: `is_root` is an informational top-level marker and is NOT unique —
+ * any number of users may be roots (the old `uq_single_root` partial unique
+ * index is dropped in `migrations/0003_multi_root.sql`). This therefore always
+ * succeeds; it is never re-prompted or rejected because a root already exists.
  */
 export async function setRoot(
   userId: number,
   runner: Queryable = getPool(),
 ): Promise<{ ok: boolean }> {
-  try {
-    await runner.query(
-      `UPDATE users SET is_root = true, manager_id = NULL WHERE id = $1`,
-      [userId],
-    );
-    return { ok: true };
-  } catch (err: any) {
-    if (err && err.code === "23505") return { ok: false };
-    throw err;
-  }
+  await runner.query(
+    `UPDATE users SET is_root = true, manager_id = NULL WHERE id = $1`,
+    [userId],
+  );
+  return { ok: true };
 }
 
 /**
@@ -649,6 +666,81 @@ export async function getRecentReportsForUser(
 }
 
 // ---------------------------------------------------------------------------
+// Status digest (CHANGE G)
+// ---------------------------------------------------------------------------
+
+/** A subtree member with whether they have submitted a report on `istDate`. */
+export interface SubtreeReportedStatus {
+  id: number;
+  name: string | null;
+  reported: boolean;
+}
+
+/**
+ * For the given subtree user ids, return each user's `{id, name}` plus whether
+ * they have at least one report on `istDate` (fixed IST day). Deterministic
+ * reported/pending split — no LLM. Ordered by name for stable rendering.
+ */
+export async function getSubtreeReportedStatus(
+  userIds: number[],
+  istDate: string,
+  runner: Queryable = getPool(),
+): Promise<SubtreeReportedStatus[]> {
+  if (userIds.length === 0) return [];
+  return q<SubtreeReportedStatus>(
+    runner,
+    `SELECT u.id,
+            u.name,
+            EXISTS (
+              SELECT 1 FROM reports r
+              WHERE r.user_id = u.id AND r.report_date = $2
+            ) AS reported
+     FROM users u
+     WHERE u.id = ANY($1)
+     ORDER BY u.name NULLS LAST, u.id`,
+    [userIds, istDate],
+  );
+}
+
+/** A report row carrying its reporter name + the canonical names of its linked projects. */
+export interface ReportWithProjects extends Report {
+  reporter_name: string | null;
+  project_names: string[];
+}
+
+/**
+ * Reports for a set of users within an inclusive IST date range, each row
+ * carrying the reporter's name and the canonical names of its linked projects
+ * (empty array when a report links no project). Feeds `summarizeDigest`.
+ */
+export async function getReportsForUsersWithProjects(
+  userIds: number[],
+  filter: { from: string; to: string },
+  runner: Queryable = getPool(),
+): Promise<ReportWithProjects[]> {
+  if (userIds.length === 0) return [];
+  return q<ReportWithProjects>(
+    runner,
+    `SELECT r.id, r.user_id, to_char(r.report_date,'YYYY-MM-DD') AS report_date,
+            r.raw_transcript, r.structured_json, r.source_kind, r.language,
+            r.source_message_id, r.created_at,
+            u.name AS reporter_name,
+            COALESCE(
+              (SELECT array_agg(p.canonical_name ORDER BY p.canonical_name)
+               FROM report_projects rp
+               JOIN projects p ON p.id = rp.project_id
+               WHERE rp.report_id = r.id),
+              '{}'::text[]
+            ) AS project_names
+     FROM reports r
+     JOIN users u ON u.id = r.user_id
+     WHERE r.user_id = ANY($1) AND r.report_date >= $2 AND r.report_date <= $3
+     ORDER BY r.report_date DESC, r.created_at DESC`,
+    [userIds, filter.from, filter.to],
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Reminders
 // ---------------------------------------------------------------------------
 
@@ -889,4 +981,27 @@ export async function upsertTeam(
     `INSERT INTO teams (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`,
     [name],
   );
+}
+
+// ---------------------------------------------------------------------------
+// CXOs (pre-known top-level executives; matched case/whitespace/punctuation-
+// insensitively on norm_name during onboarding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up a known CXO by its normalized name. Returns the canonical display
+ * name if the normalized name matches a seeded CXO, else null. The caller is
+ * responsible for normalizing (src/util/name.ts) so matching ignores case,
+ * whitespace and punctuation.
+ */
+export async function findCxoByNormName(
+  normName: string,
+  runner: Queryable = getPool(),
+): Promise<{ name: string } | null> {
+  const rows = await q<{ name: string }>(
+    runner,
+    `SELECT name FROM cxos WHERE norm_name = $1`,
+    [normName],
+  );
+  return rows[0] ?? null;
 }
