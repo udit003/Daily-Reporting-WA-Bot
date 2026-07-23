@@ -67,8 +67,11 @@ function makeDb(initial: User[] = []) {
     listOnboardedUsers: ReturnType<typeof vi.fn>;
     countOnboardedUsers: ReturnType<typeof vi.fn>;
     getUserById: ReturnType<typeof vi.fn>;
+    findCxoByNormName: ReturnType<typeof vi.fn>;
+    _cxos: Map<string, { id: number; name: string }>;
   } = {
     _users: users,
+    _cxos: new Map(),
     insertUser: vi.fn(async (input) => {
       const u = makeUser({
         id: nextId++,
@@ -113,6 +116,9 @@ function makeDb(initial: User[] = []) {
     getUserById: vi.fn(async (id: number) => {
       const u = users.get(id);
       return u ? { ...u } : null;
+    }),
+    findCxoByNormName: vi.fn(async (normName: string) => {
+      return db._cxos.get(normName) ?? null;
     }),
   };
   return db;
@@ -159,6 +165,44 @@ describe("onboarding: first contact + name step", () => {
     const rows = sendListPage.mock.calls[0][3] as { id: string }[];
     expect(rows.some((r) => r.id === "mgr:none")).toBe(true);
     expect(rows.some((r) => r.id === "mgr:pending")).toBe(true);
+  });
+
+  it("ask_name matching a known CXO (case/whitespace/punctuation-insensitive) auto-elevates to root and skips the picker", async () => {
+    const user = makeUser({ onboarding_state: "ask_name" });
+    const db = makeDb([user]);
+    // Seeded CXO stored by normalized name.
+    db._cxos.set("gopal narang", { id: 1, name: "Gopal Narang" });
+    const { whapi, sendText, sendListPage } = makeWhapi();
+    const h = createOnboardingHandler({ db, whapi });
+
+    // Typed with different case, extra spaces and punctuation.
+    await h.handle({ ...user }, makeMsg({ text: "  GOPAL,  narang " }));
+
+    // Canonical CXO name is stored (not the raw typed text).
+    expect(db.updateUserOnboarding).toHaveBeenCalledWith(user.id, {
+      name: "Gopal Narang",
+      onboarding_state: "ask_manager",
+    });
+    // Elevated to root, no manager picker shown, onboarding completed.
+    expect(db.setRoot).toHaveBeenCalledWith(user.id);
+    expect(db._users.get(user.id)!.is_root).toBe(true);
+    expect(sendListPage).not.toHaveBeenCalled();
+    expect(db._users.get(user.id)!.onboarding_state).toBe("done");
+    // Help menu sent on completion.
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("ask_name with a non-CXO name presents the picker (no elevation)", async () => {
+    const user = makeUser({ onboarding_state: "ask_name" });
+    const db = makeDb([user]);
+    db._cxos.set("gopal narang", { id: 1, name: "Gopal Narang" });
+    const { whapi, sendListPage } = makeWhapi();
+    const h = createOnboardingHandler({ db, whapi });
+
+    await h.handle({ ...user }, makeMsg({ text: "Rohit Sharma" }));
+
+    expect(db.setRoot).not.toHaveBeenCalled();
+    expect(sendListPage).toHaveBeenCalledTimes(1);
   });
 });
 

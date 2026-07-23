@@ -71,6 +71,7 @@ export function buildApp(): App {
         queries.listOnboardedUsers(offset, limit),
       countOnboardedUsers: () => queries.countOnboardedUsers(),
       getUserById: (id) => queries.getUserById(id),
+      findCxoByNormName: (normName) => queries.findCxoByNormName(normName),
     },
     whapi,
     buildHelpMessage,

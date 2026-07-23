@@ -976,3 +976,39 @@ export async function upsertTeam(
     [name],
   );
 }
+
+// ---------------------------------------------------------------------------
+// CXOs (pre-known top-level executives; matched case/whitespace/punctuation-
+// insensitively on norm_name during onboarding)
+// ---------------------------------------------------------------------------
+
+/** Upsert a known CXO by its normalized name (idempotent). */
+export async function upsertCxo(
+  name: string,
+  normName: string,
+  runner: Queryable = getPool(),
+): Promise<void> {
+  await runner.query(
+    `INSERT INTO cxos (name, norm_name) VALUES ($1, $2)
+     ON CONFLICT (norm_name) DO UPDATE SET name = EXCLUDED.name`,
+    [name, normName],
+  );
+}
+
+/**
+ * Look up a known CXO by its normalized name. Returns the canonical display
+ * name if the normalized name matches a seeded CXO, else null. The caller is
+ * responsible for normalizing (src/util/name.ts) so matching ignores case,
+ * whitespace and punctuation.
+ */
+export async function findCxoByNormName(
+  normName: string,
+  runner: Queryable = getPool(),
+): Promise<{ id: number; name: string } | null> {
+  const rows = await q<{ id: number; name: string }>(
+    runner,
+    `SELECT id, name FROM cxos WHERE norm_name = $1`,
+    [normName],
+  );
+  return rows[0] ?? null;
+}

@@ -23,6 +23,7 @@ import type { ParsedMessage } from "../whapi/types";
 import type { OnboardingHandler } from "./types";
 import { buildHelpMessage as defaultBuildHelpMessage } from "./help";
 import { isValidPhone, normalizePhone, waIdToPhone } from "../util/phone";
+import { normalizeName } from "../util/name";
 import { logger } from "../util/logger";
 
 /** DB surface the onboarding handler needs (injectable for tests). */
@@ -35,6 +36,11 @@ export interface OnboardingDb {
   listOnboardedUsers(offset: number, limit: number): Promise<User[]>;
   countOnboardedUsers(): Promise<number>;
   getUserById(id: number): Promise<User | null>;
+  /**
+   * Look up a pre-known CXO by NORMALIZED name (case/whitespace/punctuation
+   * insensitive). Returns the canonical display name or null.
+   */
+  findCxoByNormName(normName: string): Promise<{ id: number; name: string } | null>;
 }
 
 /** Whapi surface the onboarding handler needs. */
@@ -161,6 +167,22 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
               user.wa_id,
               "Please tell me your name to continue.",
             );
+            return;
+          }
+          // A pre-known CXO (matched case/whitespace/punctuation-insensitively)
+          // is auto-elevated to a top-level root and skips the manager picker.
+          const cxo = await deps.db.findCxoByNormName(normalizeName(text));
+          if (cxo) {
+            await deps.db.updateUserOnboarding(user.id, {
+              name: cxo.name,
+              onboarding_state: "ask_manager",
+            });
+            await deps.db.setRoot(user.id);
+            const rootUser = (await deps.db.getUserById(user.id)) ?? {
+              ...user,
+              name: cxo.name,
+            };
+            await finish(rootUser);
             return;
           }
           const updated =
