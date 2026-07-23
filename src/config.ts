@@ -56,12 +56,33 @@ export type Config = z.infer<typeof envSchema>;
 let cached: Config | null = null;
 
 /**
+ * Secrets provided through a config/integration prompt may arrive under a
+ * labeled alias (`NAME__LABEL`, e.g. `OPENAI_API_KEY__DEMO`) rather than the
+ * bare name our schema expects. For each canonical secret name, if it is unset
+ * but exactly one `NAME__*` alias is present, adopt that alias's value. This
+ * keeps the plain env var (when set) authoritative and requires no user action.
+ */
+function withAliasedSecrets(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const aliasable = ["OPENAI_API_KEY", "WHAPI_TOKEN", "DATABASE_URL"];
+  const resolved: NodeJS.ProcessEnv = { ...env };
+  for (const name of aliasable) {
+    if (resolved[name] && resolved[name] !== "") continue;
+    const aliasValues = Object.keys(env)
+      .filter((k) => k.startsWith(`${name}__`))
+      .map((k) => env[k])
+      .filter((v): v is string => !!v && v !== "");
+    if (aliasValues.length > 0) resolved[name] = aliasValues[0];
+  }
+  return resolved;
+}
+
+/**
  * Parse and validate `process.env`. Throws a readable error listing every
  * missing/invalid required variable. Result is cached after first success.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (cached) return cached;
-  const parsed = envSchema.safeParse(env);
+  const parsed = envSchema.safeParse(withAliasedSecrets(env));
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join(".") || "(root)"}: ${i.message}`)
