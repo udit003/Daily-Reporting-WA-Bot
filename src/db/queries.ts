@@ -224,6 +224,19 @@ export async function getUserById(
   return rows[0] ?? null;
 }
 
+/** Fetch users by id (order is not guaranteed). Used to resolve names within a subtree. */
+export async function getUsersByIds(
+  ids: number[],
+  runner: Queryable = getPool(),
+): Promise<User[]> {
+  if (ids.length === 0) return [];
+  return q<User>(
+    runner,
+    `SELECT ${USER_COLS} FROM users WHERE id = ANY($1)`,
+    [ids],
+  );
+}
+
 export async function insertUser(
   input: NewUser,
   runner: Queryable = getPool(),
@@ -643,6 +656,81 @@ export async function getRecentReportsForUser(
      ORDER BY created_at DESC
      LIMIT $2`,
     [userId, limit],
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Status digest (CHANGE G)
+// ---------------------------------------------------------------------------
+
+/** A subtree member with whether they have submitted a report on `istDate`. */
+export interface SubtreeReportedStatus {
+  id: number;
+  name: string | null;
+  reported: boolean;
+}
+
+/**
+ * For the given subtree user ids, return each user's `{id, name}` plus whether
+ * they have at least one report on `istDate` (fixed IST day). Deterministic
+ * reported/pending split — no LLM. Ordered by name for stable rendering.
+ */
+export async function getSubtreeReportedStatus(
+  userIds: number[],
+  istDate: string,
+  runner: Queryable = getPool(),
+): Promise<SubtreeReportedStatus[]> {
+  if (userIds.length === 0) return [];
+  return q<SubtreeReportedStatus>(
+    runner,
+    `SELECT u.id,
+            u.name,
+            EXISTS (
+              SELECT 1 FROM reports r
+              WHERE r.user_id = u.id AND r.report_date = $2
+            ) AS reported
+     FROM users u
+     WHERE u.id = ANY($1)
+     ORDER BY u.name NULLS LAST, u.id`,
+    [userIds, istDate],
+  );
+}
+
+/** A report row carrying its reporter name + the canonical names of its linked projects. */
+export interface ReportWithProjects extends Report {
+  reporter_name: string | null;
+  project_names: string[];
+}
+
+/**
+ * Reports for a set of users within an inclusive IST date range, each row
+ * carrying the reporter's name and the canonical names of its linked projects
+ * (empty array when a report links no project). Feeds `summarizeDigest`.
+ */
+export async function getReportsForUsersWithProjects(
+  userIds: number[],
+  filter: { from: string; to: string },
+  runner: Queryable = getPool(),
+): Promise<ReportWithProjects[]> {
+  if (userIds.length === 0) return [];
+  return q<ReportWithProjects>(
+    runner,
+    `SELECT r.id, r.user_id, to_char(r.report_date,'YYYY-MM-DD') AS report_date,
+            r.raw_transcript, r.structured_json, r.source_kind, r.language,
+            r.source_message_id, r.created_at,
+            u.name AS reporter_name,
+            COALESCE(
+              (SELECT array_agg(p.canonical_name ORDER BY p.canonical_name)
+               FROM report_projects rp
+               JOIN projects p ON p.id = rp.project_id
+               WHERE rp.report_id = r.id),
+              '{}'::text[]
+            ) AS project_names
+     FROM reports r
+     JOIN users u ON u.id = r.user_id
+     WHERE r.user_id = ANY($1) AND r.report_date >= $2 AND r.report_date <= $3
+     ORDER BY r.report_date DESC, r.created_at DESC`,
+    [userIds, filter.from, filter.to],
   );
 }
 

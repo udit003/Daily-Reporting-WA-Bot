@@ -176,3 +176,106 @@ export async function answer(
   });
   return res.choices[0]?.message?.content?.trim() ?? "";
 }
+
+// ---------------------------------------------------------------------------
+// Status digest summary (CHANGE G)
+// ---------------------------------------------------------------------------
+
+/** One report's compact shape fed to `summarizeDigest`. */
+export interface DigestReport {
+  reporterName: string;
+  projects: string[];
+  summary: string;
+  tasks_done: string[];
+  blockers: string[];
+  next_steps: string[];
+}
+
+/** Structured digest the model MAY emit (validated + rendered to text). */
+export const DigestSchema = z.object({
+  sections: z.array(
+    z.object({
+      project: z.string(),
+      points: z.array(z.string()),
+    }),
+  ),
+  other: z.array(z.string()),
+});
+
+export type DigestData = z.infer<typeof DigestSchema>;
+
+const DIGEST_SYSTEM_PROMPT = [
+  "You produce a concise daily status digest for a manager from today's team reports.",
+  "Group the update points BY PROJECT NAME. Put any points not tied to a specific project under a separate \"Other updates\" bucket.",
+  "Ground the digest STRICTLY in the provided reports — never invent projects, people, or facts.",
+  "Attribute points to the reporter where useful. Keep it tight and skimmable.",
+  "Respond with a single JSON object and NOTHING else, with exactly these keys:",
+  '  "sections": array of {"project": string, "points": string[]} — one entry per project.',
+  '  "other": string[] — update points not linked to any project.',
+  "Use an empty array when a category has no items.",
+].join("\n");
+
+/** Render a validated structured digest to a WhatsApp-friendly string. */
+export function renderDigest(data: DigestData): string {
+  const parts: string[] = [];
+  for (const section of data.sections) {
+    const project = section.project.trim();
+    const points = section.points.map((p) => p.trim()).filter((p) => p.length > 0);
+    if (!project || points.length === 0) continue;
+    parts.push(`*${project}*\n${points.map((p) => `• ${p}`).join("\n")}`);
+  }
+  const other = data.other.map((p) => p.trim()).filter((p) => p.length > 0);
+  if (other.length > 0) {
+    parts.push(`*Other updates*\n${other.map((p) => `• ${p}`).join("\n")}`);
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Summarize today's subtree reports into a concise project-grouped digest with
+ * an "Other updates" bucket. Returns plain text. Throws on LLM/parse failure so
+ * the caller can fall back to a deterministic app-side grouping.
+ */
+export async function summarizeDigest(
+  reports: DigestReport[],
+  client: OpenAI = getOpenAI(),
+): Promise<string> {
+  const cfg = loadConfig();
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: "system", content: DIGEST_SYSTEM_PROMPT },
+    { role: "user", content: JSON.stringify({ reports }) },
+  ];
+
+  let content = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await client.chat.completions.create({
+      model: cfg.OPENAI_CHAT_MODEL,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages,
+    });
+    content = res.choices[0]?.message?.content ?? "";
+
+    const result = DigestSchema.safeParse(safeParseJson(content));
+    if (result.success) {
+      const rendered = renderDigest(result.data);
+      if (rendered.trim().length > 0) return rendered;
+      // Empty render (nothing groupable) — let the caller fall back.
+      throw new Error("digest render produced empty output");
+    }
+
+    if (attempt === 0) {
+      messages.push({ role: "assistant", content });
+      messages.push({
+        role: "user",
+        content:
+          "That response was not valid. Return ONLY the JSON object with 'sections' and 'other'. Errors:\n" +
+          result.error.issues
+            .map((i) => `- ${i.path.join(".") || "(root)"}: ${i.message}`)
+            .join("\n"),
+      });
+    }
+  }
+
+  throw new Error("summarizeDigest: could not produce a valid digest");
+}
