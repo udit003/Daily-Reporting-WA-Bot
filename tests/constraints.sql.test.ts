@@ -33,31 +33,34 @@ beforeEach(async () => {
   await cleanDb();
 });
 
-describe("single-root uniqueness (uq_single_root)", () => {
-  it("allows exactly one completed root and rejects a second", async () => {
+describe("multiple roots allowed (CHANGE E)", () => {
+  it("allows two completed roots to coexist", async () => {
     const a = await makeUser("111", "Advait");
     const b = await makeUser("222", "Soham");
 
+    // CHANGE E: setRoot always succeeds — no single-root guard.
     expect((await setRoot(a.id)).ok).toBe(true);
-    // A second completed root violates the partial unique index.
-    expect((await setRoot(b.id)).ok).toBe(false);
+    expect((await setRoot(b.id)).ok).toBe(true);
 
-    // A is still the root.
     const fetchedA = await getUserById(a.id);
+    const fetchedB = await getUserById(b.id);
     expect(fetchedA?.is_root).toBe(true);
+    expect(fetchedA?.manager_id).toBeNull();
+    expect(fetchedB?.is_root).toBe(true);
+    expect(fetchedB?.manager_id).toBeNull();
   });
 
-  it("permits a second is_root row only if it is not yet 'done'", async () => {
-    const a = await makeUser("111", "Advait");
-    expect((await setRoot(a.id)).ok).toBe(true);
+  it("keeps each root scoped to its own subtree (no super-root)", async () => {
+    const rootA = await makeUser("111", "Advait");
+    const rootB = await makeUser("222", "Soham");
+    const repA = await makeUser("333", "Rohit");
+    await setRoot(rootA.id);
+    await setRoot(rootB.id);
+    await setUserManager(repA.id, rootA.id);
 
-    // A pending (not done) prospective root can carry is_root without conflict.
-    const b = await makeUser("222", "Soham", "new");
-    const res = await getPool().query(
-      `UPDATE users SET is_root = true WHERE id = $1`,
-      [b.id],
-    );
-    expect(res.rowCount).toBe(1);
+    // rootA sees its own reportee; rootB sees nobody.
+    expect(await getSubtreeUserIds(rootA.id)).toEqual([repA.id]);
+    expect(await getSubtreeUserIds(rootB.id)).toEqual([]);
   });
 });
 

@@ -307,24 +307,22 @@ export async function setUserManager(
 }
 
 /**
- * Mark a user as the single root (CEO). Guarded by the `uq_single_root`
- * partial unique index: a second completed root raises a unique violation,
- * which we surface as a rejection.
+ * Mark a user as a top-level root (`is_root = true`, `manager_id = NULL`).
+ *
+ * CHANGE E: `is_root` is an informational top-level marker and is NOT unique —
+ * any number of users may be roots (the old `uq_single_root` partial unique
+ * index is dropped in `migrations/0003_multi_root.sql`). This therefore always
+ * succeeds; it is never re-prompted or rejected because a root already exists.
  */
 export async function setRoot(
   userId: number,
   runner: Queryable = getPool(),
 ): Promise<{ ok: boolean }> {
-  try {
-    await runner.query(
-      `UPDATE users SET is_root = true, manager_id = NULL WHERE id = $1`,
-      [userId],
-    );
-    return { ok: true };
-  } catch (err: any) {
-    if (err && err.code === "23505") return { ok: false };
-    throw err;
-  }
+  await runner.query(
+    `UPDATE users SET is_root = true, manager_id = NULL WHERE id = $1`,
+    [userId],
+  );
+  return { ok: true };
 }
 
 /**
