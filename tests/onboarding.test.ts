@@ -68,7 +68,7 @@ function makeDb(initial: User[] = []) {
     countOnboardedUsers: ReturnType<typeof vi.fn>;
     getUserById: ReturnType<typeof vi.fn>;
     findCxoByNormName: ReturnType<typeof vi.fn>;
-    _cxos: Map<string, { id: number; name: string }>;
+    _cxos: Map<string, { name: string }>;
   } = {
     _users: users,
     _cxos: new Map(),
@@ -171,17 +171,18 @@ describe("onboarding: first contact + name step", () => {
     const user = makeUser({ onboarding_state: "ask_name" });
     const db = makeDb([user]);
     // Seeded CXO stored by normalized name.
-    db._cxos.set("gopal narang", { id: 1, name: "Gopal Narang" });
+    db._cxos.set("gopal narang", { name: "Gopal Narang" });
     const { whapi, sendText, sendListPage } = makeWhapi();
     const h = createOnboardingHandler({ db, whapi });
 
     // Typed with different case, extra spaces and punctuation.
     await h.handle({ ...user }, makeMsg({ text: "  GOPAL,  narang " }));
 
-    // Canonical CXO name is stored (not the raw typed text).
+    // Canonical CXO name is stored (not the raw typed text); stale pending
+    // manager link is cleared.
     expect(db.updateUserOnboarding).toHaveBeenCalledWith(user.id, {
       name: "Gopal Narang",
-      onboarding_state: "ask_manager",
+      pending_manager_phone: null,
     });
     // Elevated to root, no manager picker shown, onboarding completed.
     expect(db.setRoot).toHaveBeenCalledWith(user.id);
@@ -195,12 +196,26 @@ describe("onboarding: first contact + name step", () => {
   it("ask_name with a non-CXO name presents the picker (no elevation)", async () => {
     const user = makeUser({ onboarding_state: "ask_name" });
     const db = makeDb([user]);
-    db._cxos.set("gopal narang", { id: 1, name: "Gopal Narang" });
+    db._cxos.set("gopal narang", { name: "Gopal Narang" });
     const { whapi, sendListPage } = makeWhapi();
     const h = createOnboardingHandler({ db, whapi });
 
     await h.handle({ ...user }, makeMsg({ text: "Rohit Sharma" }));
 
+    expect(db.setRoot).not.toHaveBeenCalled();
+    expect(sendListPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("ask_name with punctuation-only input never matches a CXO (no empty-key match)", async () => {
+    const user = makeUser({ onboarding_state: "ask_name" });
+    const db = makeDb([user]);
+    const { whapi, sendListPage } = makeWhapi();
+    const h = createOnboardingHandler({ db, whapi });
+
+    await h.handle({ ...user }, makeMsg({ text: "!!!" }));
+
+    // Empty normalized key short-circuits: no DB lookup, no elevation.
+    expect(db.findCxoByNormName).not.toHaveBeenCalled();
     expect(db.setRoot).not.toHaveBeenCalled();
     expect(sendListPage).toHaveBeenCalledTimes(1);
   });

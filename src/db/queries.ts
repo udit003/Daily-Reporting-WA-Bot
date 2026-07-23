@@ -982,19 +982,6 @@ export async function upsertTeam(
 // insensitively on norm_name during onboarding)
 // ---------------------------------------------------------------------------
 
-/** Upsert a known CXO by its normalized name (idempotent). */
-export async function upsertCxo(
-  name: string,
-  normName: string,
-  runner: Queryable = getPool(),
-): Promise<void> {
-  await runner.query(
-    `INSERT INTO cxos (name, norm_name) VALUES ($1, $2)
-     ON CONFLICT (norm_name) DO UPDATE SET name = EXCLUDED.name`,
-    [name, normName],
-  );
-}
-
 /**
  * Look up a known CXO by its normalized name. Returns the canonical display
  * name if the normalized name matches a seeded CXO, else null. The caller is
@@ -1004,10 +991,10 @@ export async function upsertCxo(
 export async function findCxoByNormName(
   normName: string,
   runner: Queryable = getPool(),
-): Promise<{ id: number; name: string } | null> {
-  const rows = await q<{ id: number; name: string }>(
+): Promise<{ name: string } | null> {
+  const rows = await q<{ name: string }>(
     runner,
-    `SELECT id, name FROM cxos WHERE norm_name = $1`,
+    `SELECT name FROM cxos WHERE norm_name = $1`,
     [normName],
   );
   return rows[0] ?? null;

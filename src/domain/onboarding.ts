@@ -40,7 +40,7 @@ export interface OnboardingDb {
    * Look up a pre-known CXO by NORMALIZED name (case/whitespace/punctuation
    * insensitive). Returns the canonical display name or null.
    */
-  findCxoByNormName(normName: string): Promise<{ id: number; name: string } | null>;
+  findCxoByNormName(normName: string): Promise<{ name: string } | null>;
 }
 
 /** Whapi surface the onboarding handler needs. */
@@ -171,11 +171,18 @@ export function createOnboardingHandler(deps: OnboardingDeps): OnboardingHandler
           }
           // A pre-known CXO (matched case/whitespace/punctuation-insensitively)
           // is auto-elevated to a top-level root and skips the manager picker.
-          const cxo = await deps.db.findCxoByNormName(normalizeName(text));
+          // Guard against an empty normalized key (e.g. punctuation-only input)
+          // so it can never match a seeded name.
+          const normName = normalizeName(text);
+          const cxo = normName
+            ? await deps.db.findCxoByNormName(normName)
+            : null;
           if (cxo) {
+            // Clear any stale pending-manager link so a later reconcile can't
+            // re-parent this root under someone who joins after promotion.
             await deps.db.updateUserOnboarding(user.id, {
               name: cxo.name,
-              onboarding_state: "ask_manager",
+              pending_manager_phone: null,
             });
             await deps.db.setRoot(user.id);
             const rootUser = (await deps.db.getUserById(user.id)) ?? {

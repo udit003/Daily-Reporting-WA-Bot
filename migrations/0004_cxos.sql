@@ -12,5 +12,6 @@ CREATE TABLE IF NOT EXISTS cxos (
   id         SERIAL PRIMARY KEY,
   name       TEXT NOT NULL,          -- canonical display name
   norm_name  TEXT UNIQUE NOT NULL,   -- normalized match key
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (norm_name <> '')            -- never seed an empty key (would match punctuation-only input)
 );
